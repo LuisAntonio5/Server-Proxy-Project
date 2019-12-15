@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <arpa/inet.h>
+#include <time.h>
 #include <sodium.h>
 
 
@@ -24,12 +25,14 @@ typedef unsigned char byte;
 
 
 void erro(char *msg);
+int decrypt(char *target_file, char *source_file, byte* key);
 
 int main(int argc, char *argv[]){
   //SODIUM LIB
   unsigned char client_pk[crypto_kx_PUBLICKEYBYTES], client_sk[crypto_kx_SECRETKEYBYTES];
   unsigned char client_rx[crypto_kx_SESSIONKEYBYTES], client_tx[crypto_kx_SESSIONKEYBYTES];
-  
+  unsigned char server_pk[crypto_kx_PUBLICKEYBYTES];
+
   char endServer[100];
   char buffer[BUF_SIZE];
   char buffer_to_rcv[BUF_SIZE];
@@ -42,6 +45,7 @@ int main(int argc, char *argv[]){
   char* token;
   char** split_command;
   socklen_t size_adr;
+  time_t start_d, end_d;
 
   //Init sodium
   if(sodium_init()<0){
@@ -57,7 +61,7 @@ int main(int argc, char *argv[]){
   bzero((void *) &server_addr, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_addr.s_addr = ((struct in_addr *)(hostPtr->h_addr))->s_addr;
-  server_addr.sin_port = htons(atoi(argv[2]));
+  server_addr.sin_port = htons(atoi(argv[3]));
   size_adr = sizeof(server_addr);
   //UDP SOCKET
   if ((fdUDP = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
@@ -72,9 +76,22 @@ int main(int argc, char *argv[]){
   if( connect(fdTCP,(struct sockaddr *)&server_addr,sizeof (server_addr)) < 0){
     erro("Connect");
   }
-
+  //ESTABELCE LIGAÇAO
+  printf("%s\n", argv[2]);
+  //write(fdTCP, argv[2], 1+sizeof(argv[2]));
+  sleep(1);
+  //share public keys
+  crypto_kx_keypair(client_pk, client_sk);
+  write(fdTCP, client_pk, sizeof(client_pk));
+  read(fdTCP, server_pk, sizeof(server_pk));
+  if(crypto_kx_client_session_keys(client_rx, client_tx,client_pk, client_sk, server_pk) != 0){
+    printf("Suspicious server key\n");
+    close(fdTCP);
+    exit(-1);
+  }
   while(1){
     command_lenght = 0;
+
     printf("COMMAND: ");
     fflush(stdout);
     fgets(buffer, sizeof(buffer), stdin);
@@ -109,26 +126,42 @@ int main(int argc, char *argv[]){
         write(fdTCP, buffer, sizeof(buffer));
         break;
       }
+
       else if(command_lenght == 4){
         if(strcmp(split_command[0],"DOWNLOAD") == 0 && strcmp(split_command[1],"UDP") == 0){
+          FILE* f;
+          int total_bytes = 0;
+          fd_set fdset;
           //write(fdTCP, "UDP", 5*sizeof(char));
-
           //verify if file exists
-          write(fdTCP, split_command[2], sizeof(split_command[2]));
+          write(fdTCP, split_command[3], sizeof(split_command[3]));
 
           // wait to check if file was found
           nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
           buffer_to_rcv[nread] = '\0';
           printf("%s\n", buffer_to_rcv);
           if(strcmp(buffer_to_rcv,"OK") == 0){
-            struct timeval tv = {1,0};
-            sendto(fdUDP, (const char*)split_command[2], strlen(split_command[2]), 0, (const struct sockaddr*)&server_addr, sizeof(server_addr));
-            FILE* f = fopen(split_command[2],"wb");
+            if(strcmp(split_command[2],"ENC") == 0){
+              strcpy(buffer,"UDP-E");
+            }
+            else{
+              strcpy(buffer,"UDP-N");
+            }
+            write(fdTCP, buffer,sizeof(buffer));
+            struct timeval tv = {2,0};
+            sendto(fdUDP, (const char*)split_command[3], strlen(split_command[3]), 0, (const struct sockaddr*)&server_addr, sizeof(server_addr));
 
-            fd_set fdset;
+            if(strcmp(split_command[2],"ENC") == 0){
+              f = fopen("temp","wb");
+            }
+            else{
+              f = fopen(split_command[3],"wb");
+            }
+
             FD_ZERO(&fdset);
 
             //sai quando não existir nada para receber
+            time(&start_d);
             while(1){
               FD_SET(fdUDP,&fdset);
               int not_empty = select(fdUDP+1,&fdset,NULL,NULL,&tv);
@@ -137,40 +170,79 @@ int main(int argc, char *argv[]){
                 nread = recvfrom(fdUDP, buffer_to_rcv, sizeof(byte)*BUF_SIZE, 0,NULL, NULL);
                 printf("%d\n", nread);
                 fwrite(buffer_to_rcv,sizeof(byte),nread,f);
+                total_bytes = total_bytes + nread;
               }
               else{
                 break;
               }
             }
-
             fclose(f);
-            printf("%s asdasdad\n", buffer);
+
+            if(strcmp(split_command[2],"ENC") == 0){
+              decrypt(split_command[3], "temp",client_rx);
+              remove("temp");
+            }
+
+            time(&end_d);
+            double time_taken = (double)(end_d - start_d);
+            printf("\t\tDOWNLOAD %s completed\n", split_command[3]);
+            printf("\t\t%d bytes received\n", total_bytes);
+            printf("\t\t%s used\n", split_command[1]);
+            printf("\t\tTEMPO %f seconds\n",time_taken);
           }
           else{
             printf("Received a File not found error.\n");
           }
-
-
         }
+
         else if(strcmp(split_command[0],"DOWNLOAD") == 0 && strcmp(split_command[1],"TCP") == 0){
-          write(fdTCP, split_command[2], sizeof(split_command[2]));
+          int total_bytes = 0;
+          write(fdTCP, split_command[3], sizeof(split_command[3]));
 
           // wait to check if file was found
           nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
           buffer_to_rcv[nread] = '\0';
           printf("%s\n", buffer_to_rcv);
           if(strcmp(buffer_to_rcv,"OK") == 0){
-            FILE* f = fopen(split_command[2],"wb");
+            FILE* f;
+
+            //SEND INFO ABOUT PROTOCOL AND DATA ENC
+            if(strcmp(split_command[2],"ENC") == 0){
+              strcpy(buffer,"TCP-E");
+              f = fopen("temp","wb");
+            }
+            else{
+              strcpy(buffer,"TCP-N");
+              f = fopen(split_command[3],"wb");
+            }
+            write(fdTCP, buffer,sizeof(buffer));
+
+            //START DOWNLOAD
+            time(&start_d);
             while(1){
               printf("bbb\n");
               nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
               printf("%d\n", nread);
               fwrite(buffer_to_rcv,sizeof(byte),nread,f);
+              total_bytes = total_bytes + nread;
               if(nread != BUF_SIZE){
                 break;
               }
             }
+
             fclose(f);
+            if(strcmp(split_command[2],"ENC") == 0){
+              decrypt(split_command[3], "temp",client_rx);
+              remove("temp");
+            }
+
+            //DOWNLOAD COMPLETED
+            time(&end_d);
+            double time_taken = (double)(end_d - start_d);
+            printf("\t\tDOWNLOAD %s completed\n", split_command[3]);
+            printf("\t\t%d bytes received\n", total_bytes);
+            printf("\t\t%s used\n", split_command[1]);
+            printf("\t\tTEMPO %f seconds\n",time_taken);
           }
           else{
             printf("Received a File not found error.\n");
@@ -188,4 +260,47 @@ int main(int argc, char *argv[]){
 void erro(char *msg) {
 	printf("Erro: %s\n", msg);
 	exit(-1);
+}
+
+ int decrypt(char *target_file, char *source_file, byte* key)
+{
+    byte  buf_in[BUF_SIZE + crypto_secretstream_xchacha20poly1305_ABYTES];
+    byte  buf_out[BUF_SIZE];
+    byte  header[crypto_secretstream_xchacha20poly1305_HEADERBYTES];
+    crypto_secretstream_xchacha20poly1305_state st;
+    FILE          *fp_t, *fp_s;
+    unsigned long long out_len;
+    size_t         rlen;
+    int            eof;
+    unsigned char  tag;
+    fp_s = fopen(source_file, "rb");
+    fp_t = fopen(target_file, "wb");
+    fread(header, 1, sizeof header, fp_s);
+    if (crypto_secretstream_xchacha20poly1305_init_pull(&st, header, key) != 0) {
+        /* incomplete header */
+        fclose(fp_t);
+        fclose(fp_s);
+        return -1;
+    }
+    do {
+        rlen = fread(buf_in, 1, sizeof buf_in, fp_s);
+        eof = feof(fp_s);
+        if (crypto_secretstream_xchacha20poly1305_pull(&st, buf_out, &out_len, &tag, buf_in, rlen, NULL, 0) != 0) {
+            /* corrupted chunk */
+            fclose(fp_t);
+            fclose(fp_s);
+            return -1;
+        }
+        if (tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL && ! eof) {
+            /* premature end (end of file reached before the end of the stream) */
+            fclose(fp_t);
+            fclose(fp_s);
+            return -1;
+        }
+        fwrite(buf_out, 1, (size_t) out_len, fp_t);
+    } while (! eof);
+
+    fclose(fp_t);
+    fclose(fp_s);
+    return 0;
 }
