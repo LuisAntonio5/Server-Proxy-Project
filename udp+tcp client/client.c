@@ -13,7 +13,7 @@
 #include <sodium.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
+#include <signal.h>
 
 //get files from ./server_files
 #include <dirent.h>
@@ -21,6 +21,7 @@
 
 #define SERVER_PORT     9000
 #define BUF_SIZE 1024
+#define FILE_PATH_SIZE 100
 
 typedef unsigned char byte;
 
@@ -39,39 +40,43 @@ int main(int argc, char *argv[]){
   char buffer[BUF_SIZE];
   char buffer_to_rcv[BUF_SIZE];
   char aux[BUF_SIZE];
+  char file_path[FILE_PATH_SIZE];
   int fdTCP,fdUDP;
   struct sockaddr_in server_addr;
   struct hostent *hostPtr;
-  int command_lenght = 0;
+  int command_length = 0;
   int nread;
   char* token;
   char** split_command;
-  socklen_t size_adr;
-  time_t start_d, end_d;
+  struct timespec start,end;
   int fail_download;
+
+  if (argc != 4) {
+    	printf("cliente <server ip> <proxy ip> <port>\n");
+    	exit(-1);
+  }
+
+  signal(SIGINT,SIG_IGN);
 
   //Init sodium
   if(sodium_init()<0){
     erro("Couldn't init sodium");
-    exit(-1);
   }
 
   mkdir("client_files", 0777);
 
-  strcpy(endServer, argv[1]);
+  strcpy(endServer, argv[2]);
   if ((hostPtr = gethostbyname(endServer)) == 0)
-    	printf("Nao consegui obter endereço\n");
+    	erro("Nao consegui obter endereço\n");
 
   //LIMPA addr
   bzero((void *) &server_addr, sizeof(server_addr));
   server_addr.sin_family = AF_INET;
   server_addr.sin_addr.s_addr = ((struct in_addr *)(hostPtr->h_addr))->s_addr;
   server_addr.sin_port = htons(atoi(argv[3]));
-  size_adr = sizeof(server_addr);
   //UDP SOCKET
   if ((fdUDP = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-    printf("socket creation failed");
-    exit(0);
+    erro("socket creation failed");
   }
   //TCP SOCKET
   if((fdTCP = socket(AF_INET,SOCK_STREAM,0)) == -1){
@@ -83,7 +88,8 @@ int main(int argc, char *argv[]){
   }
   //ESTABELCE LIGAÇAO
   // printf("%s\n", argv[2]);
-  // write(fdTCP, argv[2], 1+sizeof(argv[2]));
+  strcpy(buffer,argv[1]);
+  write(fdTCP, buffer, sizeof(buffer));
   // sleep(1);
   //share public keys
   crypto_kx_keypair(client_pk, client_sk);
@@ -109,7 +115,7 @@ int main(int argc, char *argv[]){
     exit(-1);
   }
   while(1){
-    command_lenght = 0;
+    command_length = 0;
     fail_download = 0;
     printf("COMMAND: ");
     fflush(stdout);
@@ -121,14 +127,14 @@ int main(int argc, char *argv[]){
     token = strtok(aux," ");
 
     while(token){
-      split_command = (char**)realloc(split_command,(command_lenght+1)*sizeof(char*));
-      split_command[command_lenght] = (char*)calloc(strlen(token)+1,sizeof(char));
-      strcpy(split_command[command_lenght],token);
+      split_command = (char**)realloc(split_command,(command_length+1)*sizeof(char*));
+      split_command[command_length] = (char*)calloc(strlen(token)+1,sizeof(char));
+      strcpy(split_command[command_length],token);
       token = strtok(NULL, " ");
-      command_lenght++;
+      command_length++;
     }
 
-    if(command_lenght>0){
+    if(command_length>0){
       //LEU ALGO
       if(strcmp(buffer,"LIST") == 0){
         write(fdTCP, buffer, sizeof(buffer));
@@ -143,10 +149,12 @@ int main(int argc, char *argv[]){
       }
       else if(strcmp(buffer,"QUIT") == 0){
         write(fdTCP, buffer, sizeof(buffer));
+        close(fdTCP);
+        close(fdUDP);
         break;
       }
 
-      else if(command_lenght == 4){
+      else if(command_length == 4){
         if(strcmp(split_command[0],"DOWNLOAD") == 0 && strcmp(split_command[1],"UDP") == 0){
           FILE* f;
           int total_bytes = 0;
@@ -167,30 +175,29 @@ int main(int argc, char *argv[]){
               strcpy(buffer,"UDP-N");
             }
             write(fdTCP, buffer,sizeof(buffer));
-            struct timeval tv = {2,0};
+            struct timeval tv = {1,0};
             sendto(fdUDP, (const char*)split_command[3], strlen(split_command[3]), 0, (const struct sockaddr*)&server_addr, sizeof(server_addr));
 
             if(strcmp(split_command[2],"ENC") == 0){
-              f = fopen("temp","wb");
+              f = fopen("client_files/temp","wb");
             }
             else{
-              f = fopen(split_command[3],"wb");
+              sprintf(file_path,"client_files/%s",split_command[3]);
+              f = fopen(file_path,"wb");
             }
 
             FD_ZERO(&fdset);
 
             //sai quando não existir nada para receber
-            time(&start_d);
+            clock_gettime(CLOCK_MONOTONIC_RAW,&start);
             while(1){
               FD_SET(fdUDP,&fdset);
               int not_empty = select(fdUDP+1,&fdset,NULL,NULL,&tv);
-              printf("EMPTY %d\n", not_empty);
               if(not_empty){
                 nread = recvfrom(fdUDP, buffer_to_rcv, sizeof(byte)*BUF_SIZE, 0,NULL, NULL);
-                if(checksum(buffer_to_rcv,nread) != 0){
+                if(checksum((byte*)buffer_to_rcv,nread) != 0){
                   fail_download = 1;
                 }
-                printf("%d\n", nread);
                 fwrite(buffer_to_rcv,sizeof(byte),nread-1,f);
                 total_bytes = total_bytes + nread;
               }
@@ -201,19 +208,23 @@ int main(int argc, char *argv[]){
             if(fail_download == 1){
               printf("\tERRO NO DOWNLOAD. DOWNLOAD NAO VALIDO\n");
             }
+            else{
+              printf("\tDOWNLOAD BEM SUCEDIDO\n");
+            }
             fclose(f);
 
             if(strcmp(split_command[2],"ENC") == 0){
-              decrypt(split_command[3], "temp",client_rx);
-              remove("temp");
+              sprintf(file_path,"client_files/%s",split_command[3]);
+              decrypt(file_path, "client_files/temp",client_rx);
+              remove("client_files/temp");
             }
 
-            time(&end_d);
-            double time_taken = (double)(end_d - start_d);
+            clock_gettime(CLOCK_MONOTONIC_RAW,&end);
+            double time_wasted = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec)/1000;
             printf("\t\tDOWNLOAD %s completed\n", split_command[3]);
             printf("\t\t%d bytes received\n", total_bytes);
             printf("\t\t%s used\n", split_command[1]);
-            printf("\t\tTEMPO %f seconds\n",time_taken);
+            printf("\t\tTEMPO %f seconds\n",time_wasted/1000000);
           }
           else{
             printf("Received a File not found error.\n");
@@ -234,19 +245,20 @@ int main(int argc, char *argv[]){
             //SEND INFO ABOUT PROTOCOL AND DATA ENC
             if(strcmp(split_command[2],"ENC") == 0){
               strcpy(buffer,"TCP-E");
-              f = fopen("temp","wb");
+              f = fopen("client_files/temp","wb");
             }
             else{
               strcpy(buffer,"TCP-N");
-              f = fopen(split_command[3],"wb");
+              sprintf(file_path,"client_files/%s",split_command[3]);
+              f = fopen(file_path,"wb");
             }
             write(fdTCP, buffer,sizeof(buffer));
 
             //START DOWNLOAD
-            time(&start_d);
+            clock_gettime(CLOCK_MONOTONIC_RAW,&start);
             while(1){
               nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
-              if(checksum(buffer_to_rcv,nread) != 0){
+              if(checksum((byte*)buffer_to_rcv,nread) != 0){
                 fail_download = 1;
               }
               fwrite(buffer_to_rcv,sizeof(byte),nread-1,f);
@@ -258,25 +270,29 @@ int main(int argc, char *argv[]){
 
             fclose(f);
             if(strcmp(split_command[2],"ENC") == 0){
-              decrypt(split_command[3], "temp",client_rx);
-              remove("temp");
+              sprintf(file_path,"client_files/%s",split_command[3]);
+              decrypt(file_path, "client_files/temp",client_rx);
+              remove("client_files/temp");
             }
 
             //DOWNLOAD COMPLETED
             if(fail_download == 1){
               printf("\tERRO NO DOWNLOAD. DOWNLOAD NAO VALIDO\n");
             }
-            time(&end_d);
-            double time_taken = (double)(end_d - start_d);
+            else{
+              printf("\tDOWNLOAD BEM SUCEDIDO\n");
+            }
+
+            clock_gettime(CLOCK_MONOTONIC_RAW,&end);
+            double time_wasted = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_nsec - start.tv_nsec)/1000;
             printf("\t\tDOWNLOAD %s completed\n", split_command[3]);
             printf("\t\t%d bytes received\n", total_bytes);
             printf("\t\t%s used\n", split_command[1]);
-            printf("\t\tTEMPO %f seconds\n",time_taken);
+            printf("\t\tTEMPO %f seconds\n",time_wasted/1000000);
           }
           else{
             printf("Received a File not found error.\n");
           }
-
         }
       }
     }

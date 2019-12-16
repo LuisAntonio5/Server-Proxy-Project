@@ -1,5 +1,5 @@
 CC = gcc
-  CFLAGS = -lsodium -lpthread
+  CFLAGS = -lsodium -lpthread -Wall
 
   SRCS = $(wildcard *.c)
 

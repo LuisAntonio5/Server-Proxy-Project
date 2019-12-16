@@ -20,7 +20,7 @@
 #define PORT_LENGTH 10
 #define FILE_PATH_SIZE 100
 #define ADDR_MAX_SIZE 15
-
+#define MAX_CLIENTS 2
 
 
 typedef unsigned char byte;
@@ -46,7 +46,6 @@ pthread_mutex_t mutex_ll_connections = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_losses = PTHREAD_MUTEX_INITIALIZER;
 ptr_connections ll_connections = NULL;
 
-
 void erro(char *msg);
 void handle_udp_requests();
 void* process_client(void* ptr_fd_client);
@@ -55,6 +54,10 @@ ptr_connections insert_connection(ptr_connections list, ptr_connections new);
 ptr_connections delete_connection(ptr_connections list, pthread_t thread);
 int only_numbers(char* str);
 
+void erro(char *msg) {
+	printf("Erro: %s\n", msg);
+	exit(-1);
+}
 
 int main(int argc, char *argv[]) {
   int fd, client;
@@ -67,7 +70,7 @@ int main(int argc, char *argv[]) {
   mkdir("proxy_files", 0777);
 
   if (argc != 2) {
-    	printf("proxy <port>\nread");
+    	printf("proxy <port>\n");
     	exit(-1);
   }
 
@@ -85,22 +88,22 @@ int main(int argc, char *argv[]) {
   bzero((void *) &addr, sizeof(addr));
   //Socket para receber requests do cliente
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr("127.0.0.2");
+  addr.sin_addr.s_addr = inet_addr("127.0.0.3");
   addr.sin_port = htons(atoi(port));
 
   //CRIA SOCKET UDP
   if ( (fdUDP = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
-    printf("ERRO");
+    erro("ERRO");
   if ( bind(fdUDP,(struct sockaddr*)&addr,sizeof(addr)) < 0)
-	  printf("ERRO");
+	  erro("ERRO");
 
   //CRIA SOCKET TCP
   if ( (fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-	 printf("ERRO");
+	 erro("ERRO");
   if ( bind(fd,(struct sockaddr*)&addr,sizeof(addr)) < 0)
-	 printf("ERRO");
+	 erro("ERRO");
   if( listen(fd, 5) < 0)
-  	printf("na funcao listen");
+  	erro("na funcao listen");
 
   pthread_create(&new_thread,NULL,manage_stdin,NULL);
 
@@ -109,7 +112,6 @@ int main(int argc, char *argv[]) {
   while (1) {
     while(waitpid(-1,NULL,WNOHANG)>0);
     client = accept(fd,(struct sockaddr *)&client_addr,(socklen_t *)&client_addr_size);
-    printf("aaaaaa\n");
     if (client > 0) {
         if (pthread_create(&new_thread,NULL,process_client, &client)){
           printf("error creating thread\n");
@@ -117,7 +119,7 @@ int main(int argc, char *argv[]) {
         new_connection = (ptr_connections)malloc(sizeof(Connections));
         new_connection->thread = new_thread;
         // strcpy(new_connection->addr,inet_ntoa((struct in_addr)client_addr.sin_addr.s_addr));
-        inet_ntop( AF_INET, &client_addr, new_connection->addr, INET_ADDRSTRLEN );
+        inet_ntop( AF_INET, &(client_addr.sin_addr), new_connection->addr, INET_ADDRSTRLEN );
         new_connection->port=ntohs(client_addr.sin_port);
         new_connection->next = NULL;
         pthread_mutex_lock(&mutex_ll_connections);
@@ -126,11 +128,6 @@ int main(int argc, char *argv[]) {
       }
   }
   return 0;
-}
-
-void erro(char *msg) {
-	printf("Erro: %s\nread", msg);
-	exit(-1);
 }
 
 void* process_client(void* ptr_fd_client){
@@ -151,12 +148,12 @@ void* process_client(void* ptr_fd_client){
 
   //Le comando passado pelo cliente
   //O primeiro connect -> buffer == ip host
-  // nread = read(fd_client, buffer,sizeof(buffer));
-  // buffer[nread] = '\0';
-  // printf("PROXY : %s\nread", buffer);
+  nread = read(fd_client, buffer,sizeof(buffer));
+  buffer[nread] = '\0';
+  printf("PROXY : %s\nread", buffer);
 
-  // strcpy(endServer, buffer);
-  if ((hostPtr = gethostbyname("127.0.0.1")) == 0)
+  strcpy(endServer, buffer);
+  if ((hostPtr = gethostbyname(buffer)) == 0)
     	erro("Nao consegui obter endereço");
 
   //Limpa addr
@@ -166,7 +163,7 @@ void* process_client(void* ptr_fd_client){
   addr_server.sin_port = htons((short) atoi(port));
   //endereço do servidor
   if(strlen(server_addr) == 0){
-    inet_ntop( AF_INET, &addr_server, server_addr, INET_ADDRSTRLEN );
+    inet_ntop( AF_INET, &(addr_server.sin_addr), server_addr, INET_ADDRSTRLEN );
   }
 
 
@@ -187,13 +184,11 @@ void* process_client(void* ptr_fd_client){
    //INFO SOBRE REJEITADO OU CONNECTED
    nread = read(fd_server, buffer_server,sizeof(buffer_server));
    buffer_server[nread] = '\0';
-   printf("%s\n", buffer_server);
    write(fd_client,buffer_server,sizeof(buffer_server));
 
   while(1){
     nread = read(fd_client, buffer,sizeof(buffer));
     buffer[nread] = '\0';
-    printf("COMANDO:%s\n", buffer);
     write(fd_server,buffer,sizeof(buffer));
     if(strcmp(buffer,"QUIT") == 0){
       pthread_mutex_lock(&mutex_ll_connections);
@@ -205,7 +200,6 @@ void* process_client(void* ptr_fd_client){
       while(strcmp(buffer_server,"#")){
         nread = read(fd_server,buffer_server,sizeof(buffer_server));
         buffer_server[nread] = '\0';
-        printf("%d %s\nread",nread, buffer_server);
         write(fd_client,buffer_server,sizeof(buffer_server));
       }
       //clear buffer from server
@@ -217,14 +211,12 @@ void* process_client(void* ptr_fd_client){
       //RECEBE RESPOSTA SOBRE SE O FILE PODE SER DOWNLOADED
       nread = read(fd_server, buffer_server,sizeof(buffer_server));
       buffer_server[nread] = '\0';
-      printf("%s\n", buffer_server);
       write(fd_client,buffer_server,sizeof(buffer_server));
 
       if(strcmp(buffer_server,"OK") == 0){
         //RECEBE PROTOCOLO
         nread = read(fd_client, buffer,sizeof(buffer));
         buffer[nread] = '\0';
-        printf("%s\n", buffer);
         write(fd_server,buffer,sizeof(buffer));
 
         pthread_mutex_lock(&mutex_save);
@@ -270,7 +262,6 @@ void* process_client(void* ptr_fd_client){
             sendto(fdUDP, buffer_server,sizeof(byte)*nread,0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
 
             pthread_mutex_lock(&mutex_save);
-            printf("%d\n", save);
             if(save){
               fwrite(buffer_server,sizeof(byte),nread-1,f);
             }
@@ -288,7 +279,6 @@ void* process_client(void* ptr_fd_client){
             write(fd_client,buffer_server,sizeof(byte) * nread);
 
             pthread_mutex_lock(&mutex_save);
-            printf("%d\n", save);
             if(save){
               fwrite(buffer_server,sizeof(byte),nread-1,f);
             }
@@ -306,11 +296,11 @@ void* process_client(void* ptr_fd_client){
         }
       }
       else if(strcmp(buffer_server,"404") == 0){
-        printf("ERRO\n");
       }
     }
   }
   close(fd_server);
+  pthread_exit(NULL);
 }
 
 void* manage_stdin(){
@@ -324,14 +314,15 @@ void* manage_stdin(){
     fflush(stdout);
     fgets(buffer, sizeof(buffer), stdin);
     buffer[strlen(buffer)-1] = '\0';
-    printf("%s\n", buffer);
     if(strcmp(buffer,"SAVE") == 0){
       pthread_mutex_lock(&mutex_save);
       if(save == 0){
         save = 1;
+        printf("\tFUNCAO GUARDAR ATIVADA\n");
       }
       else{
         save = 0;
+        printf("\tFUNCAO GUARDAR DESATIVADA\n");
       }
       pthread_mutex_unlock(&mutex_save);
     }
@@ -361,7 +352,6 @@ void* manage_stdin(){
         token = strtok(NULL, " ");
         command_lenght++;
       }
-      printf("%d\n", command_lenght);
       if(command_lenght == 2 && strcmp(split_command[0],"LOSSES") == 0 && only_numbers(split_command[1]) && atoi(split_command[1])<=100 && atoi(split_command[1])>=0){
         pthread_mutex_lock(&mutex_losses);
         losses_perc = atoi(split_command[1]);

@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 //get files from ./server_files
 #include <dirent.h>
@@ -37,22 +38,23 @@ typedef struct{
 byte checksum(byte* stream,size_t size);
 int encrypt(char *target_file, char *source_file, byte* key);
 void manage_tcp(int client_fd, int n_client);
+void cleanup(int sig);
 
 int fdTCP,fdUDP;
 mem_structure* shared_memory;
 sem_t* sem_n_clients;
+int shmid;
 
 int main(int argc, char *argv[]){
   int client;
-  fd_set fdset;
   struct sockaddr_in addr;
   struct sockaddr_in client_addr;
   int client_addr_size;
-  char buffer[BUF_SIZE];
-  int nread;
+  signal(SIGINT,cleanup);
+  mkdir("server_files", 0777);
 
   //CREATE SHARED MEM. HANDLE MAX CLIENTS
-  int shmid = shmget(IPC_PRIVATE,sizeof(mem_structure),IPC_CREAT | 0777);
+  shmid = shmget(IPC_PRIVATE,sizeof(mem_structure),IPC_CREAT | 0777);
   if(shmid == -1){
     printf("Error creating shared memory\n");
     return -1;
@@ -66,7 +68,7 @@ int main(int argc, char *argv[]){
   bzero((void *) &addr, sizeof(addr));
   //
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+  addr.sin_addr.s_addr = inet_addr("127.0.0.2");
   addr.sin_port = htons(atoi(argv[1]));
 
   if ( (fdTCP = socket(AF_INET, SOCK_STREAM, 0)) < 0)
@@ -101,37 +103,6 @@ int main(int argc, char *argv[]){
   }
 }
 
-// void manage_udp_download(){
-//   char send_buffer[BUF_SIZE];
-//   char buffer[BUF_SIZE];
-//   char file_path[FILE_PATH_SIZE];
-//   FILE* f;
-//   socklen_t size_adr;
-//   int nread;
-//   struct sockaddr_in client_addr;
-//   #ifdef DEBUG
-//   printf("UDP\n");
-//   #endif
-//   size_adr = sizeof(client_addr);
-//   nread = recvfrom(fdUDP, buffer, sizeof(buffer), 0,(struct sockaddr*)&client_addr, &size_adr);
-//   buffer[nread] = '\0';
-//   sprintf(file_path,"server_files/%s",buffer);
-//   f = fopen(file_path,"rb");
-//   //TODO: verificar se existe no rep
-//   if(!f){
-//     printf("aaa\n");
-//   }
-//   else{
-//     while((nread=fread(&send_buffer,sizeof(byte),BUF_SIZE,f)) != 0){
-//       printf("%d\n", nread);
-//       //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
-//       sendto(fdUDP, send_buffer, sizeof(byte)*nread, 0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
-//       sleep(0.1);
-//     }
-//   }
-//   fclose(f);
-//
-// }
 
 void manage_tcp(int client_fd,int n_client){
   unsigned char server_pk[crypto_kx_PUBLICKEYBYTES], server_sk[crypto_kx_SECRETKEYBYTES];
@@ -150,6 +121,7 @@ void manage_tcp(int client_fd,int n_client){
   #ifdef DEBUG
   printf("TCP\n");
   #endif
+  signal(SIGINT,SIG_IGN);
   //Creating keys
   crypto_kx_keypair(server_pk, server_sk);
   read(client_fd, client_pk, sizeof(client_pk));
@@ -176,7 +148,6 @@ void manage_tcp(int client_fd,int n_client){
     printf("%s\n",buffer);
   	buffer[nread] = '\0';
     if(strcmp(buffer,"QUIT") == 0){
-      printf("aaaaaaaaaaaaaa\n");
       sem_wait(sem_n_clients);
       shared_memory->n_clients--;
       sem_post(sem_n_clients);
@@ -186,11 +157,14 @@ void manage_tcp(int client_fd,int n_client){
       files = opendir(DIR_NAME);
       while((myfile = readdir(files)) != NULL){
         memset(buffer_to_send, 0, sizeof(buffer_to_send));
+        stat(file_path, &mystat);
         if(strcmp(myfile->d_name,".") && strcmp(myfile->d_name,"..")){
           sprintf(file_path, "%s/%s",DIR_NAME,myfile->d_name);
-          stat(file_path, &mystat);
-          sprintf(buffer_to_send, "%zu bytes\t\t%s",mystat.st_size,myfile->d_name);
-          write(client_fd,buffer_to_send,sizeof(buffer_to_send));
+          if(mystat.st_size != 0){
+            printf("%zu\n",mystat.st_size );
+            sprintf(buffer_to_send, "%zu bytes\t\t%s",mystat.st_size,myfile->d_name);
+            write(client_fd,buffer_to_send,sizeof(buffer_to_send));
+          }
           sleep(0.1);
         }
       }
@@ -202,7 +176,6 @@ void manage_tcp(int client_fd,int n_client){
     else{
       //RECEBE NOME DO FICHEIRO
       FILE* f;
-      printf("aaaa\n");
       sprintf(file_path,"server_files/%s",buffer);
       strcpy(file_name,buffer);
       f = fopen(file_path,"rb");
@@ -214,82 +187,87 @@ void manage_tcp(int client_fd,int n_client){
       }
       else{
         //HA FICHEIRO
-        strcpy(buffer_to_send,"OK");
-        write(client_fd, buffer_to_send,sizeof(char)*3);
-        nread = read(client_fd, buffer, sizeof(buffer));
-        //RECEBE UDP OU TCP
-        printf("readdd\n");
-      	buffer[nread] = '\0';
-        if(strcmp(buffer,"UDP-E") == 0 || strcmp(buffer,"UDP-N") == 0){
-          int encrypt_file = 0;
-          socklen_t size_adr;
-          struct sockaddr_in client_addr;
-          #ifdef DEBUG
-          printf("UDP\n");
-          #endif
-
-          if(buffer[4] == 'E'){
-            encrypt_file = 1;
-          }
-
-          //FIX: para receber o clientaddr nao e necessario fazer isto
-          size_adr = sizeof(client_addr);
-          nread = recvfrom(fdUDP, buffer, sizeof(buffer), 0,(struct sockaddr*)&client_addr, &size_adr);
-          buffer[nread] = '\0';
-
-          if(encrypt_file){
-            if (encrypt("server_files/temp",file_path, server_tx) != 0) {
-              exit(-1);
-            }
-            fclose(f);
-            f = fopen("server_files/temp","rb");
-          }
-
-          //send chunks
-          while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
-            printf("%d\n", nread);
-            buffer_to_send[nread] = checksum(buffer_to_send,nread);
-            printf("CHECKSUM:%02x\n", buffer_to_send[nread]);
-            printf("CHECKSUM:%02x\n", checksum(buffer_to_send,nread+1));
-            //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
-            sendto(fdUDP, buffer_to_send, sizeof(byte)*(nread+1), 0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
-            sleep(0.1);
-          }
-          if(encrypt_file){
-            remove("server_files/temp");
-          }
+        stat(file_path, &mystat);
+        if(mystat.st_size == 0){
+          strcpy(buffer_to_send,"404");
+          write(client_fd, buffer_to_send,sizeof(char)*4);
           fclose(f);
         }
+        else{
+          strcpy(buffer_to_send,"OK");
+          write(client_fd, buffer_to_send,sizeof(char)*3);
+          nread = read(client_fd, buffer, sizeof(buffer));
+          //RECEBE UDP OU TCP
+          printf("readdd\n");
+        	buffer[nread] = '\0';
+          if(strcmp(buffer,"UDP-E") == 0 || strcmp(buffer,"UDP-N") == 0){
+            int encrypt_file = 0;
+            socklen_t size_adr;
+            struct sockaddr_in client_addr;
+            #ifdef DEBUG
+            printf("UDP\n");
+            #endif
 
-        else if(strcmp(buffer,"TCP-E") == 0 || strcmp(buffer,"TCP-N") == 0){
-          int encrypt_file = 0;
-          if(buffer[4] == 'E'){
-            encrypt_file = 1;
-          }
+            if(buffer[4] == 'E'){
+              encrypt_file = 1;
+            }
 
-          if(encrypt_file){
-            if (encrypt("server_files/temp",file_path, server_tx) != 0) {
-              exit(-1);
+            //FIX: para receber o clientaddr nao e necessario fazer isto
+            size_adr = sizeof(client_addr);
+            nread = recvfrom(fdUDP, buffer, sizeof(buffer), 0,(struct sockaddr*)&client_addr, &size_adr);
+            buffer[nread] = '\0';
+
+            if(encrypt_file){
+              if (encrypt("server_files/temp",file_path, server_tx) != 0) {
+                exit(-1);
+              }
+              fclose(f);
+              f = fopen("server_files/temp","rb");
+            }
+
+            //send chunks
+            while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
+              printf("%d\n", nread);
+              buffer_to_send[nread] = checksum((byte*)buffer_to_send,nread);
+              //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
+              sendto(fdUDP, buffer_to_send, sizeof(byte)*(nread+1), 0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
+              sleep(0.1);
+            }
+            if(encrypt_file){
+              remove("server_files/temp");
             }
             fclose(f);
-            f = fopen("server_files/temp","rb");
           }
 
-          while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
-            printf("%d\n", nread);
-            //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
-            buffer_to_send[nread] = checksum(buffer_to_send,nread);
-            write(client_fd, buffer_to_send,sizeof(byte)*(nread+1));
-            sleep(0.1);
-          }
+          else if(strcmp(buffer,"TCP-E") == 0 || strcmp(buffer,"TCP-N") == 0){
+            int encrypt_file = 0;
+            if(buffer[4] == 'E'){
+              encrypt_file = 1;
+            }
 
-          if(encrypt_file){
-            remove("server_files/temp");
+            if(encrypt_file){
+              if (encrypt("server_files/temp",file_path, server_tx) != 0) {
+                exit(-1);
+              }
+              fclose(f);
+              f = fopen("server_files/temp","rb");
+            }
+
+            while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
+              printf("%d\n", nread);
+              //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
+              buffer_to_send[nread] = checksum((byte*)buffer_to_send,nread);
+              write(client_fd, buffer_to_send,sizeof(byte)*(nread+1));
+              sleep(0.1);
+            }
+
+            if(encrypt_file){
+              remove("server_files/temp");
+            }
+            fclose(f);
           }
-          fclose(f);
         }
       }
-
     }
 
   	printf("SERVER: %s\n", buffer);
@@ -330,4 +308,18 @@ byte checksum(byte* stream,size_t size){
     chk -= *stream++;
   }
   return chk;
+}
+
+void cleanup(int sig){
+  printf("\nSHUTING DOWN...\n");
+  for(int i=0;i<MAX_CLIENTS;i++){
+    wait(NULL);
+  }
+  close(fdTCP);
+  close(fdUDP);
+  sem_unlink(SEM_N_CLIENTS);
+  shmdt(shared_memory);
+  shmctl(shmid,IPC_RMID,NULL);
+  printf("SHUTDOWN COMPLETE\n");
+  exit(0);
 }
