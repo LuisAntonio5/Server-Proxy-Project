@@ -25,7 +25,7 @@
 typedef unsigned char byte;
 
 
-
+byte checksum(byte* stream,size_t size);
 void erro(char *msg);
 int decrypt(char *target_file, char *source_file, byte* key);
 
@@ -48,6 +48,7 @@ int main(int argc, char *argv[]){
   char** split_command;
   socklen_t size_adr;
   time_t start_d, end_d;
+  int fail_download;
 
   //Init sodium
   if(sodium_init()<0){
@@ -88,6 +89,20 @@ int main(int argc, char *argv[]){
   crypto_kx_keypair(client_pk, client_sk);
   write(fdTCP, client_pk, sizeof(client_pk));
   read(fdTCP, server_pk, sizeof(server_pk));
+
+  //RECEBER INFO SOBRE REJEITADO
+  nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
+  buffer_to_rcv[nread] = '\0';
+  printf("%s\n",buffer_to_rcv );
+  if(strcmp(buffer_to_rcv,"OK") == 0){
+    printf("Connectando ao servidor..\n");
+  }
+  else if(strcmp(buffer_to_rcv,"QUIT") == 0){
+    printf("Limite ultrapassado\n");
+    strcpy(buffer,"QUIT");
+    write(fdTCP, buffer, sizeof(buffer));
+    return 0;
+  }
   if(crypto_kx_client_session_keys(client_rx, client_tx,client_pk, client_sk, server_pk) != 0){
     printf("Suspicious server key\n");
     close(fdTCP);
@@ -95,7 +110,7 @@ int main(int argc, char *argv[]){
   }
   while(1){
     command_lenght = 0;
-
+    fail_download = 0;
     printf("COMMAND: ");
     fflush(stdout);
     fgets(buffer, sizeof(buffer), stdin);
@@ -172,13 +187,19 @@ int main(int argc, char *argv[]){
               printf("EMPTY %d\n", not_empty);
               if(not_empty){
                 nread = recvfrom(fdUDP, buffer_to_rcv, sizeof(byte)*BUF_SIZE, 0,NULL, NULL);
+                if(checksum(buffer_to_rcv,nread) != 0){
+                  fail_download = 1;
+                }
                 printf("%d\n", nread);
-                fwrite(buffer_to_rcv,sizeof(byte),nread,f);
+                fwrite(buffer_to_rcv,sizeof(byte),nread-1,f);
                 total_bytes = total_bytes + nread;
               }
               else{
                 break;
               }
+            }
+            if(fail_download == 1){
+              printf("\tERRO NO DOWNLOAD. DOWNLOAD NAO VALIDO\n");
             }
             fclose(f);
 
@@ -224,10 +245,11 @@ int main(int argc, char *argv[]){
             //START DOWNLOAD
             time(&start_d);
             while(1){
-              printf("bbb\n");
               nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
-              printf("%d\n", nread);
-              fwrite(buffer_to_rcv,sizeof(byte),nread,f);
+              if(checksum(buffer_to_rcv,nread) != 0){
+                fail_download = 1;
+              }
+              fwrite(buffer_to_rcv,sizeof(byte),nread-1,f);
               total_bytes = total_bytes + nread;
               if(nread != BUF_SIZE){
                 break;
@@ -241,6 +263,9 @@ int main(int argc, char *argv[]){
             }
 
             //DOWNLOAD COMPLETED
+            if(fail_download == 1){
+              printf("\tERRO NO DOWNLOAD. DOWNLOAD NAO VALIDO\n");
+            }
             time(&end_d);
             double time_taken = (double)(end_d - start_d);
             printf("\t\tDOWNLOAD %s completed\n", split_command[3]);
@@ -307,4 +332,12 @@ void erro(char *msg) {
     fclose(fp_t);
     fclose(fp_s);
     return 0;
+}
+
+byte checksum(byte* stream,size_t size){
+  byte chk = 0;
+  while(size-- != 0){
+    chk -= *stream++;
+  }
+  return chk;
 }

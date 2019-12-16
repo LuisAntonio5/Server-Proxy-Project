@@ -10,6 +10,12 @@
 #include <sys/wait.h>
 #include <arpa/inet.h>
 #include <sodium.h>
+#include <sys/ipc.h>
+#include <semaphore.h>
+#include <sys/shm.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 //get files from ./server_files
 #include <dirent.h>
@@ -20,17 +26,23 @@
 #define BUF_SIZE 1024
 #define DIR_NAME "server_files"
 #define DEBUG
+#define SEM_N_CLIENTS "SEM_N_CLIENTS"
+#define MAX_CLIENTS 2
 
 typedef unsigned char byte;
+typedef struct{
+  int n_clients;
+} mem_structure;
 
+byte checksum(byte* stream,size_t size);
 int encrypt(char *target_file, char *source_file, byte* key);
-void manage_udp_download();
-void manage_tcp(int client_fd);
+void manage_tcp(int client_fd, int n_client);
+
 int fdTCP,fdUDP;
+mem_structure* shared_memory;
+sem_t* sem_n_clients;
 
 int main(int argc, char *argv[]){
-  //Sodium LIB
-
   int client;
   fd_set fdset;
   struct sockaddr_in addr;
@@ -38,6 +50,17 @@ int main(int argc, char *argv[]){
   int client_addr_size;
   char buffer[BUF_SIZE];
   int nread;
+
+  //CREATE SHARED MEM. HANDLE MAX CLIENTS
+  int shmid = shmget(IPC_PRIVATE,sizeof(mem_structure),IPC_CREAT | 0777);
+  if(shmid == -1){
+    printf("Error creating shared memory\n");
+    return -1;
+  }
+  shared_memory = (mem_structure*)shmat(shmid,NULL,0);
+  shared_memory->n_clients = 0;
+  sem_unlink(SEM_N_CLIENTS);
+  sem_n_clients = sem_open(SEM_N_CLIENTS, O_CREAT|O_EXCL, 0777, 1);
 
   //LIMPA addr
   bzero((void *) &addr, sizeof(addr));
@@ -58,28 +81,23 @@ int main(int argc, char *argv[]){
   if ( bind(fdUDP,(struct sockaddr*)&addr,sizeof(addr)) < 0)
 	  printf("ERRO");
 
-  //MULTIPLEX para 2 fds
-  FD_ZERO(&fdset);
+
   while(1){
-    FD_SET(fdTCP,&fdset);
-    FD_SET(fdUDP,&fdset);
-    //espera por um connect, seja udp ou TCP
-    select(fdUDP+1,&fdset,NULL,NULL,NULL);
-    if(FD_ISSET(fdTCP,&fdset)){
-      client_addr_size = sizeof(client_addr);
-      client = accept(fdTCP,(struct sockaddr *)&client_addr,(socklen_t *)&client_addr_size);
-      if (client > 0) {
-        if (fork() == 0) {
-          close(fdTCP);
-          manage_tcp(client);
-          exit(0);
-        }
-      close(client);
+    client_addr_size = sizeof(client_addr);
+    while(waitpid(-1,NULL,WNOHANG)>0);
+    client = accept(fdTCP,(struct sockaddr *)&client_addr,(socklen_t *)&client_addr_size);
+    printf("aaaaaaaaa\n");
+    if (client > 0) {
+      if (fork() == 0) {
+        close(fdTCP);
+        sem_wait(sem_n_clients);
+        shared_memory->n_clients++;
+        sem_post(sem_n_clients);
+        manage_tcp(client,shared_memory->n_clients);
+        exit(0);
       }
+    close(client);
     }
-    // if(FD_ISSET(fdUDP,&fdset)){
-    //   manage_udp_download();
-    // }
   }
 }
 
@@ -115,7 +133,7 @@ int main(int argc, char *argv[]){
 //
 // }
 
-void manage_tcp(int client_fd){
+void manage_tcp(int client_fd,int n_client){
   unsigned char server_pk[crypto_kx_PUBLICKEYBYTES], server_sk[crypto_kx_SECRETKEYBYTES];
   unsigned char server_rx[crypto_kx_SESSIONKEYBYTES], server_tx[crypto_kx_SESSIONKEYBYTES];
   unsigned char client_pk[crypto_kx_PUBLICKEYBYTES];
@@ -132,11 +150,21 @@ void manage_tcp(int client_fd){
   #ifdef DEBUG
   printf("TCP\n");
   #endif
-
   //Creating keys
   crypto_kx_keypair(server_pk, server_sk);
   read(client_fd, client_pk, sizeof(client_pk));
   write(client_fd, server_pk, sizeof(server_pk));
+
+  //ENVIAR QUIT SE REJEITADO
+  printf("N: %d\n", n_client);
+  if(n_client>MAX_CLIENTS){
+    strcpy(buffer,"QUIT");
+    write(client_fd, buffer, sizeof(buffer));
+  }
+  else{
+    strcpy(buffer,"OK");
+    write(client_fd, buffer, sizeof(buffer));
+  }
   if(crypto_kx_server_session_keys(server_rx, server_tx,server_pk, server_sk, client_pk) != 0){
     printf("Suspicious server key\n");
     close(client_fd);
@@ -148,6 +176,10 @@ void manage_tcp(int client_fd){
     printf("%s\n",buffer);
   	buffer[nread] = '\0';
     if(strcmp(buffer,"QUIT") == 0){
+      printf("aaaaaaaaaaaaaa\n");
+      sem_wait(sem_n_clients);
+      shared_memory->n_clients--;
+      sem_post(sem_n_clients);
       break;
     }
     else if(strcmp(buffer, "LIST") == 0 ){
@@ -211,13 +243,16 @@ void manage_tcp(int client_fd){
             }
             fclose(f);
             f = fopen("server_files/temp","rb");
-
           }
+
           //send chunks
-          while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE,f)) != 0){
+          while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
             printf("%d\n", nread);
+            buffer_to_send[nread] = checksum(buffer_to_send,nread);
+            printf("CHECKSUM:%02x\n", buffer_to_send[nread]);
+            printf("CHECKSUM:%02x\n", checksum(buffer_to_send,nread+1));
             //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
-            sendto(fdUDP, buffer_to_send, sizeof(byte)*nread, 0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
+            sendto(fdUDP, buffer_to_send, sizeof(byte)*(nread+1), 0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
             sleep(0.1);
           }
           if(encrypt_file){
@@ -225,6 +260,7 @@ void manage_tcp(int client_fd){
           }
           fclose(f);
         }
+
         else if(strcmp(buffer,"TCP-E") == 0 || strcmp(buffer,"TCP-N") == 0){
           int encrypt_file = 0;
           if(buffer[4] == 'E'){
@@ -239,10 +275,11 @@ void manage_tcp(int client_fd){
             f = fopen("server_files/temp","rb");
           }
 
-          while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE,f)) != 0){
+          while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
             printf("%d\n", nread);
             //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
-            write(client_fd, buffer_to_send,sizeof(byte)*nread);
+            buffer_to_send[nread] = checksum(buffer_to_send,nread);
+            write(client_fd, buffer_to_send,sizeof(byte)*(nread+1));
             sleep(0.1);
           }
 
@@ -285,4 +322,12 @@ void manage_tcp(int client_fd){
     fclose(fp_t);
     fclose(fp_s);
     return 0;
+}
+
+byte checksum(byte* stream,size_t size){
+  byte chk = 0;
+  while(size-- != 0){
+    chk -= *stream++;
+  }
+  return chk;
 }

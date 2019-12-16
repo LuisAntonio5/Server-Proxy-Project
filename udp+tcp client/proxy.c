@@ -13,6 +13,8 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <math.h>
+#include <sys/wait.h>
 
 #define BUFFER_SIZE 1024
 #define PORT_LENGTH 10
@@ -37,9 +39,11 @@ char port[PORT_LENGTH];
 char server_addr[INET_ADDRSTRLEN];
 int counter;
 int save;
+double losses_perc = 0;
 pthread_mutex_t mutex_save = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_counter = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ll_connections = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t mutex_losses = PTHREAD_MUTEX_INITIALIZER;
 ptr_connections ll_connections = NULL;
 
 
@@ -49,6 +53,7 @@ void* process_client(void* ptr_fd_client);
 void* manage_stdin();
 ptr_connections insert_connection(ptr_connections list, ptr_connections new);
 ptr_connections delete_connection(ptr_connections list, pthread_t thread);
+int only_numbers(char* str);
 
 
 int main(int argc, char *argv[]) {
@@ -102,8 +107,9 @@ int main(int argc, char *argv[]) {
   client_addr_size = sizeof(client_addr);
 
   while (1) {
-      // while(waitpid(-1,NULL,WNOHANG)>0);
+    while(waitpid(-1,NULL,WNOHANG)>0);
     client = accept(fd,(struct sockaddr *)&client_addr,(socklen_t *)&client_addr_size);
+    printf("aaaaaa\n");
     if (client > 0) {
         if (pthread_create(&new_thread,NULL,process_client, &client)){
           printf("error creating thread\n");
@@ -178,6 +184,12 @@ void* process_client(void* ptr_fd_client){
    buffer[nread] = '\0';
    write(fd_client,server_pk,sizeof(server_pk));
 
+   //INFO SOBRE REJEITADO OU CONNECTED
+   nread = read(fd_server, buffer_server,sizeof(buffer_server));
+   buffer_server[nread] = '\0';
+   printf("%s\n", buffer_server);
+   write(fd_client,buffer_server,sizeof(buffer_server));
+
   while(1){
     nread = read(fd_client, buffer,sizeof(buffer));
     buffer[nread] = '\0';
@@ -215,6 +227,7 @@ void* process_client(void* ptr_fd_client){
         printf("%s\n", buffer);
         write(fd_server,buffer,sizeof(buffer));
 
+        pthread_mutex_lock(&mutex_save);
         if(save){
           pthread_mutex_unlock(&mutex_counter);
           sprintf(file_name,"proxy_files/%d",counter);
@@ -222,28 +235,48 @@ void* process_client(void* ptr_fd_client){
           pthread_mutex_unlock(&mutex_counter);
           f = fopen(file_name,"wb");
         }
+        pthread_mutex_unlock(&mutex_save);
+
         if(strcmp(buffer,"UDP-N") == 0 || strcmp(buffer,"UDP-E") == 0){
           //COMUNICA POR UDP
           socklen_t size_adr;
+          int n_bytes_to_remove = 0;
           size_adr = sizeof(client_addr);
           nread = recvfrom(fdUDP, buffer, sizeof(buffer), 0,(struct sockaddr*)&client_addr, &size_adr);
           buffer[nread] = '\0';
           sendto(fdUDP, buffer,sizeof(byte)*(nread+1),0, (const struct sockaddr*)&addr_server, sizeof(addr_server));
 
-          pthread_mutex_lock(&mutex_save);
-          pthread_mutex_unlock(&mutex_save);
+
           while(1){
             nread = recvfrom(fdUDP, buffer_server, sizeof(byte)*BUFFER_SIZE, 0,NULL, NULL);
+            int aux_nread = nread;
+            //BYTE LOSSES
+            pthread_mutex_lock(&mutex_losses);
+            if(losses_perc != 0){
+              srand(time(NULL));
+              n_bytes_to_remove = (losses_perc/100) * nread;
+              for(int n = 0;n<n_bytes_to_remove;n++){
+                int index = rand()%nread;
+                for(int elem_index = index;elem_index<nread-1;elem_index++){
+                  buffer_server[elem_index] = buffer_server[elem_index+1];
+                }
+                nread--;
+              }
+            }
+            pthread_mutex_unlock(&mutex_losses);
+
+
+
             sendto(fdUDP, buffer_server,sizeof(byte)*nread,0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
 
             pthread_mutex_lock(&mutex_save);
             printf("%d\n", save);
             if(save){
-              fwrite(buffer_server,sizeof(byte),nread,f);
+              fwrite(buffer_server,sizeof(byte),nread-1,f);
             }
             pthread_mutex_unlock(&mutex_save);
 
-            if(nread != BUFFER_SIZE){
+            if(aux_nread != BUFFER_SIZE){
               break;
             }
           }
@@ -257,7 +290,7 @@ void* process_client(void* ptr_fd_client){
             pthread_mutex_lock(&mutex_save);
             printf("%d\n", save);
             if(save){
-              fwrite(buffer_server,sizeof(byte),nread,f);
+              fwrite(buffer_server,sizeof(byte),nread-1,f);
             }
             pthread_mutex_unlock(&mutex_save);
 
@@ -282,7 +315,11 @@ void* process_client(void* ptr_fd_client){
 
 void* manage_stdin(){
   char buffer[BUFFER_SIZE];
+  char* token;
+  char** split_command;
   ptr_connections temp;
+  int command_lenght;
+
   while(1){
     fflush(stdout);
     fgets(buffer, sizeof(buffer), stdin);
@@ -313,6 +350,25 @@ void* manage_stdin(){
       }
       pthread_mutex_unlock(&mutex_ll_connections);
     }
+    else{
+      split_command = (char**)calloc(1,sizeof(char*));
+      token = strtok(buffer," ");
+      command_lenght = 0;
+      while(token){
+        split_command = (char**)realloc(split_command,(command_lenght+1)*sizeof(char*));
+        split_command[command_lenght] = (char*)calloc(strlen(token)+1,sizeof(char));
+        strcpy(split_command[command_lenght],token);
+        token = strtok(NULL, " ");
+        command_lenght++;
+      }
+      printf("%d\n", command_lenght);
+      if(command_lenght == 2 && strcmp(split_command[0],"LOSSES") == 0 && only_numbers(split_command[1]) && atoi(split_command[1])<=100 && atoi(split_command[1])>=0){
+        pthread_mutex_lock(&mutex_losses);
+        losses_perc = atoi(split_command[1]);
+        pthread_mutex_unlock(&mutex_losses);
+        printf("\tPERCENTAGEM DE BYTES PERDIDOS ALTERADO PARA %d PORCENTO \n", atoi(split_command[1]));
+      }
+    }
   }
 }
 
@@ -336,7 +392,6 @@ ptr_connections delete_connection(ptr_connections list, pthread_t thread){
   ptr_connections ant = NULL;
   ptr_connections current = list;
   while(current){
-    printf("%ld %ld\n", current->thread, thread);
     if(current->thread == thread){
       break;
     }
@@ -351,4 +406,13 @@ ptr_connections delete_connection(ptr_connections list, pthread_t thread){
   }
   free(current);
   return list;
+}
+
+int only_numbers(char* str){
+  for(int i = 0;i<strlen(str);i++){
+    if(str[i] < '0' || str[i] > '9'){
+      return 0;
+    }
+  }
+  return 1;
 }
