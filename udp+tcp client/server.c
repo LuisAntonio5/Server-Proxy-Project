@@ -145,7 +145,7 @@ void manage_tcp(int client_fd){
 
   while(1){
     nread = read(client_fd, buffer, sizeof(buffer));
-    printf("readdd\n");
+    printf("%s\n",buffer);
   	buffer[nread] = '\0';
     if(strcmp(buffer,"QUIT") == 0){
       break;

@@ -11,6 +11,8 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <sodium.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 
 //get files from ./server_files
@@ -53,6 +55,8 @@ int main(int argc, char *argv[]){
     exit(-1);
   }
 
+  mkdir("client_files", 0777);
+
   strcpy(endServer, argv[1]);
   if ((hostPtr = gethostbyname(endServer)) == 0)
     	printf("Nao consegui obter endereço\n");
@@ -77,9 +81,9 @@ int main(int argc, char *argv[]){
     erro("Connect");
   }
   //ESTABELCE LIGAÇAO
-  printf("%s\n", argv[2]);
-  //write(fdTCP, argv[2], 1+sizeof(argv[2]));
-  sleep(1);
+  // printf("%s\n", argv[2]);
+  // write(fdTCP, argv[2], 1+sizeof(argv[2]));
+  // sleep(1);
   //share public keys
   crypto_kx_keypair(client_pk, client_sk);
   write(fdTCP, client_pk, sizeof(client_pk));
