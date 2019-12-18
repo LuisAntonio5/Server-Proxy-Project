@@ -26,7 +26,6 @@
 #define FILE_PATH_SIZE 512
 #define BUF_SIZE 1024
 #define DIR_NAME "server_files"
-#define DEBUG
 #define SEM_N_CLIENTS "SEM_N_CLIENTS"
 #define MAX_CLIENTS 2
 
@@ -37,7 +36,7 @@ typedef struct{
 
 byte checksum(byte* stream,size_t size);
 int encrypt(char *target_file, char *source_file, byte* key);
-void manage_tcp(int client_fd, int n_client);
+void manage_connection(int client_fd, int n_client);
 void cleanup(int sig);
 
 int fdTCP,fdUDP;
@@ -52,6 +51,11 @@ int main(int argc, char *argv[]){
   int client_addr_size;
   signal(SIGINT,cleanup);
   mkdir("server_files", 0777);
+
+  if (argc != 2) {
+    	printf("server <port>\n");
+    	exit(-1);
+  }
 
   //CREATE SHARED MEM. HANDLE MAX CLIENTS
   shmid = shmget(IPC_PRIVATE,sizeof(mem_structure),IPC_CREAT | 0777);
@@ -88,14 +92,13 @@ int main(int argc, char *argv[]){
     client_addr_size = sizeof(client_addr);
     while(waitpid(-1,NULL,WNOHANG)>0);
     client = accept(fdTCP,(struct sockaddr *)&client_addr,(socklen_t *)&client_addr_size);
-    printf("aaaaaaaaa\n");
     if (client > 0) {
       if (fork() == 0) {
         close(fdTCP);
         sem_wait(sem_n_clients);
         shared_memory->n_clients++;
         sem_post(sem_n_clients);
-        manage_tcp(client,shared_memory->n_clients);
+        manage_connection(client,shared_memory->n_clients);
         exit(0);
       }
     close(client);
@@ -104,7 +107,7 @@ int main(int argc, char *argv[]){
 }
 
 
-void manage_tcp(int client_fd,int n_client){
+void manage_connection(int client_fd,int n_client){
   unsigned char server_pk[crypto_kx_PUBLICKEYBYTES], server_sk[crypto_kx_SECRETKEYBYTES];
   unsigned char server_rx[crypto_kx_SESSIONKEYBYTES], server_tx[crypto_kx_SESSIONKEYBYTES];
   unsigned char client_pk[crypto_kx_PUBLICKEYBYTES];
@@ -128,7 +131,6 @@ void manage_tcp(int client_fd,int n_client){
   write(client_fd, server_pk, sizeof(server_pk));
 
   //ENVIAR QUIT SE REJEITADO
-  printf("N: %d\n", n_client);
   if(n_client>MAX_CLIENTS){
     strcpy(buffer,"QUIT");
     write(client_fd, buffer, sizeof(buffer));
@@ -138,14 +140,13 @@ void manage_tcp(int client_fd,int n_client){
     write(client_fd, buffer, sizeof(buffer));
   }
   if(crypto_kx_server_session_keys(server_rx, server_tx,server_pk, server_sk, client_pk) != 0){
-    printf("Suspicious server key\n");
+    printf("Autenticação negada\n");
     close(client_fd);
     exit(-1);
   }
 
   while(1){
     nread = read(client_fd, buffer, sizeof(buffer));
-    printf("%s\n",buffer);
   	buffer[nread] = '\0';
     if(strcmp(buffer,"QUIT") == 0){
       sem_wait(sem_n_clients);
@@ -161,8 +162,7 @@ void manage_tcp(int client_fd,int n_client){
         if(strcmp(myfile->d_name,".") && strcmp(myfile->d_name,"..")){
           sprintf(file_path, "%s/%s",DIR_NAME,myfile->d_name);
           if(mystat.st_size != 0){
-            printf("%zu\n",mystat.st_size );
-            sprintf(buffer_to_send, "%zu bytes\t\t%s",mystat.st_size,myfile->d_name);
+            sprintf(buffer_to_send, "\t\t%s   %zu bytes",myfile->d_name,mystat.st_size);
             write(client_fd,buffer_to_send,sizeof(buffer_to_send));
           }
           sleep(0.1);
@@ -198,7 +198,6 @@ void manage_tcp(int client_fd,int n_client){
           write(client_fd, buffer_to_send,sizeof(char)*3);
           nread = read(client_fd, buffer, sizeof(buffer));
           //RECEBE UDP OU TCP
-          printf("readdd\n");
         	buffer[nread] = '\0';
           if(strcmp(buffer,"UDP-E") == 0 || strcmp(buffer,"UDP-N") == 0){
             int encrypt_file = 0;
@@ -227,7 +226,6 @@ void manage_tcp(int client_fd,int n_client){
 
             //send chunks
             while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
-              printf("%d\n", nread);
               buffer_to_send[nread] = checksum((byte*)buffer_to_send,nread);
               //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
               sendto(fdUDP, buffer_to_send, sizeof(byte)*(nread+1), 0, (const struct sockaddr*)&client_addr, sizeof(client_addr));
@@ -254,7 +252,6 @@ void manage_tcp(int client_fd,int n_client){
             }
 
             while((nread=fread(&buffer_to_send,sizeof(byte),BUF_SIZE-1,f)) != 0){
-              printf("%d\n", nread);
               //enviar tudo, o cliente sabe que chegou ao fim quando nao recebe mais bytes
               buffer_to_send[nread] = checksum((byte*)buffer_to_send,nread);
               write(client_fd, buffer_to_send,sizeof(byte)*(nread+1));

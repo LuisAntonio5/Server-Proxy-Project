@@ -150,7 +150,6 @@ void* process_client(void* ptr_fd_client){
   //O primeiro connect -> buffer == ip host
   nread = read(fd_client, buffer,sizeof(buffer));
   buffer[nread] = '\0';
-  printf("PROXY : %s\nread", buffer);
 
   strcpy(endServer, buffer);
   if ((hostPtr = gethostbyname(buffer)) == 0)
@@ -268,6 +267,9 @@ void* process_client(void* ptr_fd_client){
             pthread_mutex_unlock(&mutex_save);
 
             if(aux_nread != BUFFER_SIZE){
+              if(save){
+                fclose(f);
+              }
               break;
             }
           }

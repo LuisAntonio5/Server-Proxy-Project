@@ -110,7 +110,7 @@ int main(int argc, char *argv[]){
     return 0;
   }
   if(crypto_kx_client_session_keys(client_rx, client_tx,client_pk, client_sk, server_pk) != 0){
-    printf("Suspicious server key\n");
+    printf("Autenticação negada\n");
     close(fdTCP);
     exit(-1);
   }
@@ -227,7 +227,7 @@ int main(int argc, char *argv[]){
             printf("\t\tTEMPO %f seconds\n",time_wasted/1000000);
           }
           else{
-            printf("Received a File not found error.\n");
+            printf("File not found.\n");
           }
         }
 
@@ -238,7 +238,6 @@ int main(int argc, char *argv[]){
           // wait to check if file was found
           nread = read(fdTCP, buffer_to_rcv, sizeof(buffer_to_rcv));
           buffer_to_rcv[nread] = '\0';
-          printf("%s\n", buffer_to_rcv);
           if(strcmp(buffer_to_rcv,"OK") == 0){
             FILE* f;
 
@@ -334,6 +333,7 @@ void erro(char *msg) {
             /* corrupted chunk */
             fclose(fp_t);
             fclose(fp_s);
+            printf("Ficheiro alterado, não é possível desencriptar.\n");
             return -1;
         }
         if (tag == crypto_secretstream_xchacha20poly1305_TAG_FINAL && ! eof) {
